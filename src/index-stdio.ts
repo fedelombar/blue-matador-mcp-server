@@ -2053,9 +2053,9 @@ class BluematadorMCPServer {
   private async handleListUsers(args: any): Promise<CallToolResult> {
     const { apiClient, accountId } = this.getApiClient();
     
-    const result = await apiClient.listUsers(accountId);
+    const users = await apiClient.listUsers(accountId);
 
-    if (result.users.length === 0) {
+    if (users.length === 0) {
       return {
         content: [
           {
@@ -2066,13 +2066,13 @@ class BluematadorMCPServer {
       };
     }
 
-    const userList = result.users.map(user => `- ${user.firstName} ${user.lastName} (${user.email}) - ${user.admin ? 'Admin' : 'User'}`).join('\n');
+    const userList = users.map(user => `- ${user.firstName} ${user.lastName} (${user.email}) - ${user.admin ? 'Admin' : 'User'}`).join('\n');
 
     return {
       content: [
         {
           type: 'text',
-          text: `Found ${result.users.length} user(s):\n\n${userList}`
+          text: `Found ${users.length} user(s):\n\n${userList}`
         }
       ]
     };

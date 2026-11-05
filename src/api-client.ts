@@ -164,11 +164,11 @@ export class BluematadorApiClient {
   }
 
   // Users (Account level)
-  async listUsers(accountId: string): Promise<{ users: User[] }> {
-    const response: AxiosResponse<{ users: User[] }> = await this.client.get(
+  async listUsers(accountId: string): Promise<User[]> {
+    const response: AxiosResponse<User[] | { users: User[] }> = await this.client.get(
       `/zi/api/accounts/${accountId}/users`
     );
-    return response.data;
+    return Array.isArray(response.data) ? response.data : response.data.users ?? [];
   }
 
   async inviteUsers(accountId: string, users: InviteUserData[]): Promise<void> {
