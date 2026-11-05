@@ -19,7 +19,10 @@ import {
   ServiceNowNotificationData,
   CreateMuteRuleData,
   MuteRuleSchedule,
-  MetricsQuery
+  MetricsQuery,
+  MetricGraph,
+  GroupSeries,
+  EventCounts
 } from './types.js';
 
 const ANNOTATIONS_BY_VERB: Record<string, ToolAnnotations> = {
@@ -33,6 +36,66 @@ const ANNOTATIONS_BY_VERB: Record<string, ToolAnnotations> = {
   update: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   delete: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
 };
+
+function formatNumber(value: number): string {
+  return String(Number(Math.abs(value) >= 1 ? value.toFixed(2) : value.toPrecision(3)));
+}
+
+function formatUnit(graph: MetricGraph): string {
+  const numerator = graph.numerator.unitShort || graph.numerator.unit;
+  const denominator = graph.denominator.unitShort || graph.denominator.unit;
+  return denominator ? `${numerator}/${denominator}` : numerator;
+}
+
+interface SeriesSummary {
+  label: string;
+  count: number;
+  last: number;
+  min: number;
+  max: number;
+  avg: number;
+}
+
+function summarizeSeries(series: GroupSeries): SeriesSummary {
+  const values = series.points.map(([, value]) => value).filter((value) => Number.isFinite(value));
+  const label = Object.entries(series.group ?? {}).map(([key, value]) => `${key}=${value}`).join(', ') || 'all';
+  return {
+    label,
+    count: values.length,
+    last: values[values.length - 1],
+    min: values.reduce((min, value) => Math.min(min, value), Infinity),
+    max: values.reduce((max, value) => Math.max(max, value), -Infinity),
+    avg: values.reduce((sum, value) => sum + value, 0) / values.length,
+  };
+}
+
+function formatMetricGraph(graph: MetricGraph, agg: string): string {
+  const summaries = graph.series
+    .map(summarizeSeries)
+    .filter((summary) => summary.count > 0)
+    .sort((a, b) => b.max - a.max);
+  const lines = summaries.map((s) =>
+    `- ${s.label}: last ${formatNumber(s.last)}, min ${formatNumber(s.min)}, max ${formatNumber(s.max)}, avg ${formatNumber(s.avg)} (${s.count} points)`
+  );
+  return [`${graph.metric} (${formatUnit(graph)}, ${agg}): ${summaries.length} series, highest max first`, ...lines].join('\n');
+}
+
+function formatEventCounts(counts: EventCounts): string {
+  return Object.entries(counts).map(([bucket, bySeverity]) => {
+    const name = bucket.charAt(0).toUpperCase() + bucket.slice(1);
+    const totals = Object.entries(bySeverity)
+      .map(([severity, days]) => `${severity} ${Object.values(days).reduce((sum, n) => sum + n, 0)}`)
+      .join(', ');
+    const daily = Object.entries(bySeverity).flatMap(([severity, days]) => {
+      const nonZero = Object.entries(days)
+        .filter(([, n]) => n > 0)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([day, n]) => `${day.slice(0, 10)} ${n}`);
+      return nonZero.length > 0 ? [`  ${severity}: ${nonZero.join(', ')}`] : [];
+    });
+    return [`${name}: ${totals}`, ...daily].join('\n');
+  }).join('\n\n');
+}
 
 function withAnnotations(tools: Tool[]): Tool[] {
   return tools.map((tool) => {
@@ -1181,6 +1244,10 @@ class BluematadorMCPServer {
                   type: 'array',
                   items: { type: 'string' },
                   description: 'Label dimensions to split the series by. Labels differ per metric (e.g., ["instance_id"] for aws.ec2.cpu_utilization.percent). An unknown label returns no series. Optional.'
+                },
+                include_points: {
+                  type: 'boolean',
+                  description: 'Also return every raw [timestamp, value] point. Off by default; the summary per series is usually enough.'
                 }
               },
               required: ['metrics', 'agg', 'start', 'end']
@@ -1770,7 +1837,7 @@ class BluematadorMCPServer {
       content: [
         {
           type: 'text',
-          text: `Events summary for the last 30 days${project ? ` for project ${project}` : ''}:\n\n${JSON.stringify(summary, null, 2)}`
+          text: `Event counts for the last 30 days${project ? ` for project ${project}` : ''}, with the days that had events:\n\n${formatEventCounts(summary)}`
         }
       ]
     };
@@ -2336,7 +2403,7 @@ class BluematadorMCPServer {
   // Metrics handler
   private async handleGetMetrics(args: any): Promise<CallToolResult> {
     const { apiClient, accountId } = this.getApiClient();
-    const { agg, start, end } = args;
+    const { agg, start, end, include_points } = args;
     const metrics: string[] = [args.metrics].flat();
     const groups: string[] = args.groups === undefined ? [] : [args.groups].flat();
     const query: MetricsQuery = {
@@ -2351,15 +2418,22 @@ class BluematadorMCPServer {
     const result = await apiClient.getMetrics(query);
     const withData = new Set(result.filter((graph) => graph.series.length > 0).map((graph) => graph.metric));
     const missing = metrics.filter((metric) => !withData.has(metric));
-    const missingNote = missing.length > 0
-      ? `\n\nNo data returned for: ${missing.join(', ')}. The metric name or a group label may be wrong, or the metric had no data in this range.`
-      : '';
+    const sections = [
+      `Metrics from ${start} to ${end}${groups.length > 0 ? `, grouped by ${groups.join(', ')}` : ''}:`,
+      ...result.filter((graph) => withData.has(graph.metric)).map((graph) => formatMetricGraph(graph, agg)),
+    ];
+    if (missing.length > 0) {
+      sections.push(`No data returned for: ${missing.join(', ')}. The metric name or a group label may be wrong, or the metric had no data in this range.`);
+    }
+    if (include_points) {
+      sections.push(`Raw points:\n${JSON.stringify(result, null, 2)}`);
+    }
 
     return {
       content: [
         {
           type: 'text',
-          text: `Metrics query results:\n\n**Query:** ${metrics.join(', ')} (${agg})\n**Time Range:** ${start} to ${end}\n**Groups:** ${groups.length > 0 ? groups.join(', ') : 'None'}\n\n**Results:**\n${JSON.stringify(result, null, 2)}${missingNote}`
+          text: sections.join('\n\n')
         }
       ]
     };
