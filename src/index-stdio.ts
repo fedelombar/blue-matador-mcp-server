@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Server, ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
-import type { CallToolResult, ListToolsResult } from '@modelcontextprotocol/server';
+import type { CallToolResult, ListToolsResult, Tool, ToolAnnotations } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 
 import { BluematadorApiClient } from './api-client.js';
@@ -21,6 +21,28 @@ import {
   MuteRuleSchedule,
   MetricsQuery
 } from './types.js';
+
+const ANNOTATIONS_BY_VERB: Record<string, ToolAnnotations> = {
+  get: { readOnlyHint: true, openWorldHint: true },
+  list: { readOnlyHint: true, openWorldHint: true },
+  create: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  invite: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  mute: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  enable: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  disable: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  update: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+  delete: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+};
+
+function withAnnotations(tools: Tool[]): Tool[] {
+  return tools.map((tool) => {
+    const annotations = ANNOTATIONS_BY_VERB[tool.name.split('_')[0]];
+    if (!annotations) {
+      throw new Error(`No annotations for tool verb in ${tool.name}`);
+    }
+    return { ...tool, annotations };
+  });
+}
 
 class BluematadorMCPServer {
   private apiClient: BluematadorApiClient | null = null;
@@ -266,7 +288,7 @@ class BluematadorMCPServer {
   private setupToolHandlers(server: Server): void {
     server.setRequestHandler('tools/list', async (): Promise<ListToolsResult> => {
       return {
-        tools: [
+        tools: withAnnotations([
           {
             name: 'create_aws_integration',
             description: 'Create a new AWS integration in Bluematador',
@@ -1330,7 +1352,7 @@ class BluematadorMCPServer {
               required: ['resourcePattern']
             }
           }
-        ]
+        ])
       };
     });
 
