@@ -131,6 +131,19 @@ test('get_active_events forwards the project filter as a query parameter', async
   assert.equal(result.content[0].text, 'No active events found for project project-1.');
 });
 
+test('list_users reads the bare array the API returns, and the documented object', async (t) => {
+  const user = { id: 'u1', accountId: ACCOUNT_ID, firstName: 'Ada', lastName: 'Lovelace', email: 'ada@example.com', admin: true };
+  for (const body of [[user], { users: [user] }]) {
+    const api = await startApiStub({ [`GET /zi/api/accounts/${ACCOUNT_ID}/users`]: body });
+    t.after(api.close);
+    const client = await connectClient(t, new BluematadorMCPServer(API_KEY, ACCOUNT_ID, api.baseUrl));
+    const result = await client.callTool({ name: 'list_users', arguments: {} });
+
+    assert.notEqual(result.isError, true, JSON.stringify(body).slice(0, 20));
+    assert.match(result.content[0].text, /Found 1 user\(s\):\n\n- Ada Lovelace \(ada@example\.com\) - Admin/);
+  }
+});
+
 test('tool calls report missing credentials instead of calling the API', async (t) => {
   const saved = { key: process.env.BLUEMATADOR_API_KEY, account: process.env.BLUEMATADOR_ACCOUNT_ID };
   delete process.env.BLUEMATADOR_API_KEY;
