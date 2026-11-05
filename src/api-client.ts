@@ -23,6 +23,8 @@ import {
   InviteOrganizationUserData,
   UpdateOrganizationUserData,
   MetricsQuery,
+  MetricGraph,
+  EventCounts,
   MuteRule,
   CreateMuteRuleData,
   MuteOptions
@@ -142,11 +144,11 @@ export class BluematadorApiClient {
     return response.data;
   }
 
-  async getActiveEventsSummary(accountId: string, project?: string): Promise<any> {
+  async getActiveEventsSummary(accountId: string, project?: string): Promise<EventCounts> {
     const params: any = {};
     if (project) params.project = project;
 
-    const response: AxiosResponse<any> = await this.client.get(
+    const response: AxiosResponse<EventCounts> = await this.client.get(
       `/ma/api/accounts/${accountId}/counts`,
       { params }
     );
@@ -162,11 +164,11 @@ export class BluematadorApiClient {
   }
 
   // Users (Account level)
-  async listUsers(accountId: string): Promise<{ users: User[] }> {
-    const response: AxiosResponse<{ users: User[] }> = await this.client.get(
+  async listUsers(accountId: string): Promise<User[]> {
+    const response: AxiosResponse<User[] | { users: User[] }> = await this.client.get(
       `/zi/api/accounts/${accountId}/users`
     );
-    return response.data;
+    return Array.isArray(response.data) ? response.data : response.data.users ?? [];
   }
 
   async inviteUsers(accountId: string, users: InviteUserData[]): Promise<void> {
@@ -400,11 +402,11 @@ export class BluematadorApiClient {
   }
 
   // Metrics
-  async getMetrics(query: MetricsQuery): Promise<any> {
+  async getMetrics(query: MetricsQuery): Promise<MetricGraph[]> {
     const { accountId, ...params } = query;
-    const response: AxiosResponse<any> = await this.client.get(
-      `/me/api/accounts/${accountId}/metrics`,
-      { params }
+    const response: AxiosResponse<MetricGraph[]> = await this.client.get(
+      `/me/api/accounts/${accountId}/metrics/v2`,
+      { params, paramsSerializer: { indexes: null } }
     );
     return response.data;
   }
