@@ -22,7 +22,9 @@ import {
   MetricsQuery,
   MetricGraph,
   GroupSeries,
-  EventCounts
+  EventCounts,
+  Event,
+  MuteRule
 } from './types.js';
 
 const ANNOTATIONS_BY_VERB: Record<string, ToolAnnotations> = {
@@ -95,6 +97,47 @@ function formatEventCounts(counts: EventCounts): string {
     });
     return [`${name}: ${totals}`, ...daily].join('\n');
   }).join('\n\n');
+}
+
+const RELATED_EVENTS_SHOWN = 10;
+
+function formatEventContext(event: Event, related: Event[], mutes: MuteRule[], days: number): string {
+  const source = event.source ?? { label: 'unknown', text: 'unknown', tags: [], ref: { arn: 'unknown', refType: 'unknown' } };
+  const lines = [
+    `${event.typeText} (${event.severity})`,
+    event.summaryText,
+    `Event ID: ${event.id}`,
+    `Opened: ${event.opened}. ${event.closed ? `Closed: ${event.closed}.` : 'Still active.'}`,
+    `Muted by Bluematador: ${event.muted ? 'yes' : 'no'}${event.hidden ? ' (hidden)' : ''}`,
+    '',
+    `Resource: ${source.label || source.text}`,
+    `ARN: ${source.ref?.arn ?? 'unknown'}`,
+    `Type: ${source.ref?.refType ?? 'unknown'}`,
+  ];
+  if (source.tags?.length > 0) {
+    lines.push(`Tags: ${source.tags.map((tag) => `${tag.key}=${tag.value}`).join(', ')}`);
+  }
+  if (event.detailTexts.length > 0) {
+    lines.push('', 'Details:', ...event.detailTexts.map((detail) => `- ${detail}`));
+  }
+  if (event.links.length > 0) {
+    lines.push('', 'Links:', ...event.links.map((link) => `- ${link.text}: ${link.url}`));
+  }
+  lines.push('', `${related.length} other event${related.length === 1 ? '' : 's'} on this resource in the last ${days} days`);
+  if (related.length > 0) {
+    const byType = new Map<string, number>();
+    for (const other of related) byType.set(other.typeText, (byType.get(other.typeText) ?? 0) + 1);
+    lines.push(`By type: ${[...byType].sort(([, a], [, b]) => b - a).map(([type, count]) => `${type} ${count}`).join(', ')}`);
+    lines.push(`Most recent ${Math.min(related.length, RELATED_EVENTS_SHOWN)}:`);
+    lines.push(...related.slice(0, RELATED_EVENTS_SHOWN).map((other) =>
+      `- ${other.opened} ${other.typeText} (${other.severity}), ${other.closed ? `closed ${other.closed}` : 'still active'}, ID ${other.id}`
+    ));
+  }
+  lines.push('', mutes.length > 0 ? 'Mute rules scoped to this resource ARN:' : 'No mute rules scoped to this resource ARN.');
+  lines.push(...mutes.map((rule) => `- ${rule.id}: ${rule.active ? 'active' : 'inactive'}, ${rule.hide ? 'hides' : 'mutes'} events`));
+  lines.push('Rules scoped by project, region, or monitor are not checked here. "Muted by Bluematador" above is the API\'s own answer.');
+  lines.push('', 'For metrics, call get_metrics for this resource. Group labels differ per metric (EC2 uses instance_id).');
+  return lines.join('\n');
 }
 
 function withAnnotations(tools: Tool[]): Tool[] {
@@ -551,6 +594,24 @@ class BluematadorMCPServer {
                 }
               },
               required: []
+            }
+          },
+          {
+            name: 'get_event_context',
+            description: 'Everything needed to act on one event: the event and its details, the affected resource (ARN, type, tags), other events on the same resource, and mute rules that cover it. Use this before investigating or fixing an alert.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                event_id: {
+                  type: 'string',
+                  description: 'Event ID, from get_active_events or get_opened_events'
+                },
+                days: {
+                  type: 'number',
+                  description: 'How many days back to look for the event and for related events (default 7)'
+                }
+              },
+              required: ['event_id']
             }
           },
           {
@@ -1474,6 +1535,9 @@ class BluematadorMCPServer {
           case 'get_active_events':
             return await this.handleGetActiveEvents(finalArgs);
 
+          case 'get_event_context':
+            return await this.handleGetEventContext(finalArgs);
+
           case 'get_active_events_summary':
             return await this.handleGetActiveEventsSummary(finalArgs);
 
@@ -1825,6 +1889,52 @@ class BluematadorMCPServer {
           text: `Found ${events.length} active events${project ? ` for project ${project}` : ''}:\n\n---\n\n${eventDetails}`
         }
       ]
+    };
+  }
+
+  private async handleGetEventContext(args: any): Promise<CallToolResult> {
+    const { apiClient, accountId } = this.getApiClient();
+    const eventId: string = args.event_id;
+    const days = args.days ?? 7;
+    if (!Number.isInteger(days) || days < 1 || days > 90) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: `days must be a whole number from 1 to 90, got ${JSON.stringify(args.days)}.` }]
+      };
+    }
+    const end = new Date();
+    const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
+
+    const [active, opened, mutes] = await Promise.all([
+      apiClient.getActiveEvents(accountId),
+      apiClient.getOpenedEvents(accountId, start.toISOString(), end.toISOString()),
+      apiClient.listMuteRules(accountId),
+    ]);
+    const event = active.find((candidate) => candidate.id === eventId)
+      ?? opened.find((candidate) => candidate.id === eventId);
+
+    if (!event) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: `No event with ID ${eventId} was active or opened in the last ${days} days. Check the ID, or pass a larger days value.`
+          }
+        ]
+      };
+    }
+
+    const arn = event.source?.ref?.arn;
+    const related = arn
+      ? opened
+        .filter((other) => other.id !== event.id && other.source?.ref?.arn === arn)
+        .sort((a, b) => b.opened.localeCompare(a.opened))
+      : [];
+    const matchingMutes = arn ? mutes.filter((rule) => rule.resource?.arn === arn) : [];
+
+    return {
+      content: [{ type: 'text', text: formatEventContext(event, related, matchingMutes, days) }]
     };
   }
 
