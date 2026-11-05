@@ -48,6 +48,24 @@ test('lists the tools the server registers', async (t) => {
   assert.ok(names.includes('create_mute_rule'));
 });
 
+test('annotates every tool with hints that match its verb', async (t) => {
+  const client = await connectClient(t, new BluematadorMCPServer(API_KEY, ACCOUNT_ID, 'http://127.0.0.1:1'));
+  const { tools } = await client.listTools();
+  const hints = Object.fromEntries(tools.map((tool) => [tool.name, tool.annotations]));
+
+  for (const [name, annotations] of Object.entries(hints)) {
+    assert.ok(annotations, `${name} has annotations`);
+    assert.equal(annotations.openWorldHint, true, `${name} openWorldHint`);
+  }
+  assert.deepEqual(hints.get_active_events, { readOnlyHint: true, openWorldHint: true });
+  assert.deepEqual(hints.list_mute_rules, { readOnlyHint: true, openWorldHint: true });
+  assert.equal(hints.delete_mute_rule.destructiveHint, true);
+  assert.equal(hints.delete_integration.destructiveHint, true);
+  assert.equal(hints.create_mute_rule.destructiveHint, false);
+  assert.equal(hints.disable_notification.idempotentHint, true);
+  assert.equal(hints.update_email_notification.destructiveHint, true);
+});
+
 test('get_active_events calls the API with the account key and renders each event', async (t) => {
   const api = await startApiStub({
     [`GET /ma/api/accounts/${ACCOUNT_ID}/events/active`]: [
